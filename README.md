@@ -21,12 +21,10 @@
 Ensure you have Rust and Cargo installed, then clone the repository and build from source:
 
 ```sh
-git clone <repository_url>
+git clone https://github.com/ptysiuuu/de-slop.git
 cd de-slop
 cargo install --path .
 ```
-
-*(Note: Replace `<repository_url>` with the actual repository URL once published.)*
 
 ## Usage
 
