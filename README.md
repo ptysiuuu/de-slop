@@ -16,6 +16,17 @@
 - **Custom Rules**: Easily extensible with `.deslop-rules` files to flag or fix custom phrases specific to your project or company style guide.
 - **Fast**: Built in Rust with Rayon for parallel processing and SIMD-accelerated pre-scanning.
 
+## What's New in v0.2
+
+- **Language Packs**: Runtime profiles (`rust-pack`, `python-pack`) specifically tailored for detecting language-specific documentation slop. Stack them on top of base profiles!
+- **LSP Server**: Full editor integration via the new `deslop lsp` subcommand. Get real-time diagnostics directly in your editor.
+- **Watch Mode**: `deslop --watch` continuously monitors your directory and shows an intelligent diff of the clean-ups as you code.
+- **TUI Upgrade**: The interactive mode (`-i`) is now a full Ratatui application featuring side-by-side diffs, context window scrolling, and a progress bar.
+- **Explain Rules**: Run `deslop explain-rules` for an exhaustive catalog of what deslop checks for, including confidence levels, behaviors, and examples.
+- **Sentence Scoring**: The `--sentences` flag breaks down your documents, scoring the worst-offending individual sentences by hit density.
+- **Coverage Stats**: The `--report` output now includes rule coverage statistics to tell you which rules fired zero times.
+- **Smarter Blank Lines**: Intelligent tracking of context blocks prevents orphan blank lines from being left behind after deletion.
+
 ## Installation
 
 Ensure you have Rust and Cargo installed, then clone the repository and build from source:
@@ -43,9 +54,24 @@ deslop --interactive ./docs
 # Print a unified diff to stdout instead of modifying files
 deslop --diff ./src
 
+# Watch a directory for changes and continuously clean it
+deslop --watch ./docs
+
+# Run the Language Server Protocol daemon for editor integration
+deslop lsp
+
 # Scan only git-staged files
 deslop --staged
 ```
+
+### Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `lsp` | Start the deslop JSON-RPC Language Server |
+| `explain-rules` | Show a catalog of all active rules with examples and behavior |
+| `install-hook` | Add a git pre-commit hook to your repository |
+| `check-rules` | Validate `.deslop-rules` syntax |
 
 ### Options
 
@@ -54,12 +80,15 @@ deslop --staged
 | `-r, --recursive` | Walk directories recursively |
 | `-d, --dry-run` | Show what would change, write nothing |
 | `--diff` | Print unified diff to stdout |
-| `-i, --interactive` | Confirm each match individually |
-| `-p, --profile <PROFILE>` | Rule set: `conservative`, `prose`, `code`, `aggressive` (default: `prose`) |
+| `-i, --interactive` | Confirm each match individually using the Ratatui TUI |
+| `-w, --watch` | Monitor directory for changes and scan continuously |
+| `-p, --profile <PROFILE>` | Rule set: `conservative`, `prose`, `code`, `aggressive`, `rust-pack`, `python-pack` (default: `prose`) |
+| `--extra-profile <P>` | Stack additional profiles on top of the base profile |
 | `--fix <RULE>` | Enable only this rule (repeatable) |
 | `--skip <RULE>` | Disable this rule (repeatable) |
 | `-o, --output <PATH>` | Write to this path instead of in-place |
-| `--report` | Print score summary after processing |
+| `--report` | Print score summary and coverage stats after processing |
+| `--sentences` | Score individual sentences for AI artifact density |
 | `--threshold <FLOAT>` | Exit code 1 if any file exceeds N hits/1k chars |
 | `--min-confidence <FLOAT>` | Skip matches below this confidence (default: 0.6) |
 | `--explain` | Show reasoning for each match |
@@ -83,6 +112,10 @@ Profiles control which rule categories are active. They build on top of each oth
 - **`prose`** (Default): Includes `conservative` + Prose rules (filler openers, hedges, hollow intensifiers).
 - **`code`**: Includes `conservative` + Code rules (trivial comments, docstring filler).
 - **`aggressive`**: All rules active (Typographic, Symbol, Prose, and Code).
+
+You can also apply **Language Packs** as runtime profiles using `--profile` or `--extra-profile`:
+- **`rust-pack`**: Flags GPT-style rust docs ("This function...") and restating module doc comments.
+- **`python-pack`**: Flags boilerplate NumPy/Google style `Args:` and `Returns:` docstring filler.
 
 You can set the profile with `-p` or `--profile`:
 

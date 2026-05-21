@@ -1,12 +1,15 @@
+#![allow(dead_code, unused_imports, unused_variables)]
 mod cli;
 mod config;
 mod detector;
 mod diff;
 mod engine;
 mod interactive;
+mod lsp;
 mod report;
 mod rules;
 mod scanner;
+mod watch;
 
 use anyhow::Result;
 use clap::Parser;
@@ -20,26 +23,30 @@ use cli::{Cli, Commands, FormatArg};
 use config::load_config;
 use detector::detect_file_type;
 use engine::process_file;
-use report::{print_human_report, print_summary, JsonFileReport, JsonReport, JsonScore, JsonSummary};
+use report::{
+    print_coverage_stats, print_explain_rules, print_human_report, print_sentence_report,
+    print_summary, JsonFileReport, JsonReport, JsonScore, JsonSummary,
+};
 use rules::{build_registry, custom, Profile, Rule};
 use scanner::{is_binary, Scanner};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // ── init ──────────────────────────────────────────────────────────────────
     if cli.init {
         let p = std::env::current_dir()?.join(".desloprc.toml");
         if p.exists() {
             println!("Config file already exists at {}", p.display());
             std::process::exit(0);
         }
-        // Write a basic default
         fs::write(&p, "profile = \"prose\"\nreport = true\n")?;
         println!("Wrote config to {}", p.display());
         std::process::exit(0);
     }
 
-    if let Some(Commands::InstallHook) = cli.command {
+    // ── subcommands ───────────────────────────────────────────────────────────
+    if let Some(Commands::InstallHook) = &cli.command {
         let hook_path = Path::new(".git/hooks/pre-commit");
         if let Some(parent) = hook_path.parent() {
             if !parent.exists() {
@@ -48,7 +55,6 @@ fn main() -> Result<()> {
         }
         let content = "#!/bin/sh\ndeslop --staged --threshold 1.0 --format json --report\n";
         fs::write(hook_path, content)?;
-        // Set executable permissions on Unix
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -60,12 +66,13 @@ fn main() -> Result<()> {
         std::process::exit(0);
     }
 
+    // ── load config ───────────────────────────────────────────────────────────
     let explicit_config = cli.config.as_deref();
     let config_res = load_config(explicit_config)?;
     let (config, _) = config_res.unwrap_or_default();
 
-    if let Some(Commands::CheckRules) = cli.command {
-        // Discover .deslop-rules files by walking up from cwd
+    // ── check-rules subcommand ────────────────────────────────────────────────
+    if let Some(Commands::CheckRules) = &cli.command {
         let mut rules_paths = Vec::new();
         let mut dir = std::env::current_dir()?;
         loop {
@@ -77,7 +84,6 @@ fn main() -> Result<()> {
                 break;
             }
         }
-
         let mut has_errors = false;
         for rules_path in &rules_paths {
             let errors = custom::validate_deslop_rules(rules_path);
@@ -97,8 +103,24 @@ fn main() -> Result<()> {
         std::process::exit(0);
     }
 
-    let profile: Profile = cli.profile.into();
-    let profile = config.profile.unwrap_or(profile);
+    // ── Resolve profile and extra profiles ───────────────────────────────────
+    let base_profile: Profile = cli.profile.clone().into();
+    let base_profile = config.profile.unwrap_or(base_profile);
+
+    // Collect extra profiles from CLI and config
+    let mut extra_profiles: Vec<Profile> = cli
+        .extra_profiles
+        .iter()
+        .map(|p| p.clone().into())
+        .collect();
+
+    if let Some(cfg_extra) = &config.extra_profiles {
+        for s in cfg_extra {
+            if let Ok(p) = s.parse::<Profile>() {
+                extra_profiles.push(p);
+            }
+        }
+    }
 
     let min_confidence = cli.min_confidence.or(config.min_confidence).unwrap_or(0.6);
 
@@ -112,11 +134,14 @@ fn main() -> Result<()> {
         .as_ref()
         .and_then(|r| r.custom_phrases.clone())
         .unwrap_or_default();
-    
-    let mut built_rules = build_registry(&allow_symbols, &custom_phrases);
 
-    // Filter by profile
-    built_rules.retain(|r| profile.allows(r.category()));
+    let mut built_rules = build_registry(&allow_symbols, &custom_phrases, &extra_profiles);
+
+    // Filter by profile: a rule passes if the base profile OR any extra profile allows its category
+    built_rules.retain(|r| {
+        base_profile.allows(r.category())
+            || extra_profiles.iter().any(|ep| ep.allows(r.category()))
+    });
 
     // Load custom .deslop-rules
     let custom_files = custom::discover_deslop_rules(&std::env::current_dir()?)?;
@@ -145,7 +170,43 @@ fn main() -> Result<()> {
         }
         final_rules.push(r);
     }
+    
+    // DEBUG: print final rules
+    if let Some(Commands::ExplainRules) = &cli.command {
+        for r in &final_rules {
+            println!("DEBUG RULE: {}", r.id());
+        }
+    }
 
+    let all_rule_ids: Vec<String> = final_rules.iter().map(|r| r.id().to_string()).collect();
+
+    // ── explain-rules subcommand ──────────────────────────────────────────────
+    if let Some(Commands::ExplainRules) = &cli.command {
+        print_explain_rules(&final_rules);
+        std::process::exit(0);
+    }
+
+    // ── LSP subcommand ────────────────────────────────────────────────────────
+    if let Some(Commands::Lsp { log_level }) = &cli.command {
+        std::env::set_var("RUST_LOG", format!("deslop={}", log_level));
+        env_logger::init();
+        lsp::run_lsp_server(final_rules, min_confidence)?;
+        std::process::exit(0);
+    }
+
+    // ── Watch mode ────────────────────────────────────────────────────────────
+    if cli.watch {
+        let path_str = cli.path.as_deref().unwrap_or(".");
+        watch::run_watch(
+            Path::new(path_str),
+            &final_rules,
+            min_confidence,
+            cli.recursive,
+        )?;
+        std::process::exit(0);
+    }
+
+    // ── Normal file processing ────────────────────────────────────────────────
     let excludes = config
         .files
         .as_ref()
@@ -155,35 +216,31 @@ fn main() -> Result<()> {
     let path_str = cli.path.unwrap_or_else(|| ".".to_string());
     let scanner = Scanner::discover(Path::new(&path_str), cli.recursive, &excludes)?;
 
-    // Processing variables
-    let results = Mutex::new(Vec::new());
-    let char_counts = Mutex::new(HashMap::new());
+    let results: Mutex<Vec<_>> = Mutex::new(Vec::new());
+    let char_counts: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
+    let content_store: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 
     scanner.files().par_iter().for_each(|path| {
         let content_bytes = match fs::read(path) {
             Ok(b) => b,
             Err(_) => return,
         };
-
         if is_binary(&content_bytes) {
             return;
         }
-
         let content = String::from_utf8_lossy(&content_bytes).to_string();
-        char_counts.lock().unwrap().insert(path.to_string_lossy().to_string(), content.chars().count());
+        char_counts
+            .lock()
+            .unwrap()
+            .insert(path.to_string_lossy().to_string(), content.chars().count());
 
         let ext = path.extension().and_then(|s| s.to_str());
         let file_type = detect_file_type(&path.to_string_lossy(), ext, cli.lang.as_deref());
-
         let (modified, matches) = process_file(&content, &final_rules, file_type, min_confidence, ext);
 
         if !matches.is_empty() {
-            if cli.interactive && !cli.dry_run {
-                // Interactive blocks, so we do it serially. For now just filter.
-                // In a true parallel map we shouldn't block for TUI.
-                // We'll handle interactive sequentially after if needed, 
-                // but rayon requires us to collect first for interactive.
-            }
+            let path_key = path.to_string_lossy().to_string();
+            content_store.lock().unwrap().insert(path_key.clone(), content.clone());
             results.lock().unwrap().push((path.clone(), content, modified, matches));
         }
     });
@@ -193,17 +250,18 @@ fn main() -> Result<()> {
 
     let mut exit_code = 0;
     let mut total_matches = 0;
-    let mut worst_rule_counts = HashMap::new();
+    let mut worst_rule_counts: HashMap<String, usize> = HashMap::new();
 
     let mut json_files = Vec::new();
-    let mut simplified_results = Vec::new();
+    let mut simplified_results: Vec<(String, Vec<_>)> = Vec::new();
+    let mut sentence_results: Vec<(String, String, Vec<_>)> = Vec::new();
 
     for (path, original, mut modified, mut matches) in results {
         if cli.interactive && !cli.dry_run {
             matches = interactive::run_interactive(&path.to_string_lossy(), &original, matches.clone())?;
             let ext = path.extension().and_then(|s| s.to_str());
             let file_type = detect_file_type(&path.to_string_lossy(), ext, cli.lang.as_deref());
-            let (new_mod, _new_matches) = engine::process_file(&original, &final_rules, file_type, min_confidence, ext);
+            let (new_mod, _) = engine::process_file(&original, &final_rules, file_type, min_confidence, ext);
             modified = new_mod;
         }
 
@@ -213,14 +271,18 @@ fn main() -> Result<()> {
         }
 
         let path_str = path.to_string_lossy().to_string();
-        
+
+        if cli.sentences || cli.report {
+            sentence_results.push((path_str.clone(), original.clone(), matches.clone()));
+        }
+
         simplified_results.push((path_str.clone(), matches.clone()));
 
         if cli.format == FormatArg::Human {
             print_human_report(&path_str, &matches, cli.explain);
             if cli.diff {
-                let diff = diff::generate_diff(&original, &modified, &path_str);
-                println!("{}", diff);
+                let d = diff::generate_diff(&original, &modified, &path_str);
+                println!("{}", d);
             }
         } else if cli.format == FormatArg::Json {
             let char_count = char_counts.lock().unwrap().get(&path_str).copied().unwrap_or(0);
@@ -231,10 +293,7 @@ fn main() -> Result<()> {
             };
             json_files.push(JsonFileReport {
                 path: path_str.clone(),
-                score: JsonScore {
-                    density,
-                    total_matches: matches.len(),
-                },
+                score: JsonScore { density, total_matches: matches.len() },
                 matches: matches.clone(),
             });
         }
@@ -249,8 +308,13 @@ fn main() -> Result<()> {
         }
     }
 
+    // ── Output ────────────────────────────────────────────────────────────────
     if cli.format == FormatArg::Json {
-        let worst_rule = worst_rule_counts.into_iter().max_by_key(|(_, v)| *v).map(|(k, _)| k).unwrap_or_default();
+        let worst_rule = worst_rule_counts
+            .into_iter()
+            .max_by_key(|(_, v)| *v)
+            .map(|(k, _)| k)
+            .unwrap_or_default();
         let report = JsonReport {
             files: json_files,
             summary: JsonSummary {
@@ -261,8 +325,27 @@ fn main() -> Result<()> {
             },
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if cli.report || config.report.unwrap_or(false) {
-        print_summary(&simplified_results, scanner.files().len(), &char_counts.into_inner().unwrap());
+    } else {
+        let show_report = cli.report || cli.sentences || config.report.unwrap_or(false);
+
+        if show_report {
+            print_summary(
+                &simplified_results,
+                scanner.files().len(),
+                &char_counts.into_inner().unwrap(),
+            );
+            // Coverage stats
+            print_coverage_stats(&all_rule_ids, &worst_rule_counts);
+        }
+
+        if cli.sentences {
+            // Convert for sentence report
+            let sentence_refs: Vec<(String, &str, Vec<_>)> = sentence_results
+                .iter()
+                .map(|(p, c, m)| (p.clone(), c.as_str(), m.clone()))
+                .collect();
+            print_sentence_report(&sentence_refs, 5);
+        }
     }
 
     if let Some(_t) = cli.threshold {

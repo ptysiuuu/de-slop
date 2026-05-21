@@ -1,4 +1,4 @@
-use super::{line_col_from_offset, Category, Match, MatchKind, Rule, Severity, Span};
+use super::{line_col_from_offset, Category, Match, MatchKind, Rule, RuleExplanation, Severity, Span};
 use memchr::memchr;
 
 pub struct EmDashRule;
@@ -36,6 +36,15 @@ impl Rule for EmDashRule {
         }
         matches
     }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Em dash character (U+2014 \u{2014}) — almost never typed by humans".to_string(),
+            fix_behavior: "Replace with \" - \" (space-hyphen-space)".to_string(),
+            confidence: 1.0,
+            example_input: "word \u{2014} word".to_string(),
+            example_output: "word  -  word".to_string(),
+        }
+    }
 }
 
 pub struct EnDashRule;
@@ -72,6 +81,15 @@ impl Rule for EnDashRule {
             }
         }
         matches
+    }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "En dash character (U+2013 \u{2013})".to_string(),
+            fix_behavior: "Replace with \" - \"".to_string(),
+            confidence: 1.0,
+            example_input: "pages 10\u{2013}20".to_string(),
+            example_output: "pages 10 - 20".to_string(),
+        }
     }
 }
 
@@ -112,6 +130,15 @@ impl Rule for CurlyQuotesRule {
         }
         matches
     }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Curly/smart quotes: \u{201C}\u{201D} (double) and \u{2018}\u{2019} (single)".to_string(),
+            fix_behavior: "Replace with straight quotes \" or '".to_string(),
+            confidence: 1.0,
+            example_input: "\u{201C}hello\u{201D}".to_string(),
+            example_output: "\"hello\"".to_string(),
+        }
+    }
 }
 
 pub struct EllipsisRule;
@@ -147,6 +174,15 @@ impl Rule for EllipsisRule {
             }
         }
         matches
+    }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Ellipsis character U+2026 (\u{2026})".to_string(),
+            fix_behavior: "Replace with three dots \"...\"".to_string(),
+            confidence: 1.0,
+            example_input: "and so on\u{2026}".to_string(),
+            example_output: "and so on...".to_string(),
+        }
     }
 }
 
@@ -185,6 +221,15 @@ impl Rule for NbspRule {
         }
         matches
     }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Non-breaking space (U+00A0)".to_string(),
+            fix_behavior: "Replace with regular space".to_string(),
+            confidence: 1.0,
+            example_input: "word\u{00A0}word".to_string(),
+            example_output: "word word".to_string(),
+        }
+    }
 }
 
 pub struct ZeroWidthRule;
@@ -220,6 +265,15 @@ impl Rule for ZeroWidthRule {
             }
         }
         matches
+    }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Zero-width characters: U+200B, U+200C, U+200D, U+FEFF".to_string(),
+            fix_behavior: "Delete — removes the invisible character".to_string(),
+            confidence: 1.0,
+            example_input: "word\u{200B}word".to_string(),
+            example_output: "wordword".to_string(),
+        }
     }
 }
 
@@ -257,5 +311,14 @@ impl Rule for SoftHyphenRule {
             }
         }
         matches
+    }
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Soft hyphen (U+00AD) — invisible optional hyphen".to_string(),
+            fix_behavior: "Delete — removes the character".to_string(),
+            confidence: 1.0,
+            example_input: "soft\u{00AD}hyphen".to_string(),
+            example_output: "softhyphen".to_string(),
+        }
     }
 }

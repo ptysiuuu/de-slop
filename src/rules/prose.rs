@@ -1,4 +1,4 @@
-use super::{line_col_from_offset, Category, FileTypeFilter, Match, MatchKind, Rule, Severity, Span};
+use super::{line_col_from_offset, Category, FileTypeFilter, Match, MatchKind, Rule, RuleExplanation, Severity, Span};
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use regex::Regex;
@@ -52,6 +52,16 @@ impl Rule for FillerOpenersRule {
             }
         }
         matches
+    }
+
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: "Phrases at sentence start: \"Certainly!\", \"Absolutely!\", \"Of course!\", \"I'd be happy to\"".to_string(),
+            fix_behavior: "Replace(delete) — removes the filler phrase".to_string(),
+            confidence: 0.95,
+            example_input: "Certainly! Here is the solution.".to_string(),
+            example_output: "Here is the solution.".to_string(),
+        }
     }
 }
 

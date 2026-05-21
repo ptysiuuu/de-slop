@@ -3,6 +3,7 @@ pub mod emoji;
 pub mod prose;
 pub mod code;
 pub mod custom;
+pub mod lang_packs;
 
 use std::fmt;
 use std::ops::Range;
@@ -18,6 +19,9 @@ pub enum Category {
     Prose,
     Code,
     Custom,
+    /// Rules specific to a language pack (rust-pack, python-pack, …)
+    #[serde(rename = "pack")]
+    PackSpecific,
 }
 
 impl fmt::Display for Category {
@@ -28,6 +32,7 @@ impl fmt::Display for Category {
             Category::Prose => write!(f, "prose"),
             Category::Code => write!(f, "code"),
             Category::Custom => write!(f, "custom"),
+            Category::PackSpecific => write!(f, "pack"),
         }
     }
 }
@@ -123,6 +128,21 @@ impl Span {
     }
 }
 
+/// Human-readable explanation of a rule, shown by `deslop explain-rules`.
+#[derive(Debug, Clone)]
+pub struct RuleExplanation {
+    /// Short description of what pattern this rule matches.
+    pub pattern_summary: String,
+    /// What action the rule takes when it fires.
+    pub fix_behavior: String,
+    /// Rule confidence score.
+    pub confidence: f32,
+    /// Example input that would trigger this rule.
+    pub example_input: String,
+    /// What the output looks like after the fix.
+    pub example_output: String,
+}
+
 /// The Rule trait — every detection rule implements this.
 pub trait Rule: Send + Sync {
     /// Stable string ID for this rule (used by --fix and --skip).
@@ -139,6 +159,17 @@ pub trait Rule: Send + Sync {
     /// Run this rule against the given content and return all matches.
     /// `comment_spans` is provided for code files so rules can restrict to comments.
     fn check(&self, content: &str, comment_spans: Option<&[Span]>) -> Vec<Match>;
+
+    /// Return a human-readable explanation for `deslop explain-rules`.
+    fn explain(&self) -> RuleExplanation {
+        RuleExplanation {
+            pattern_summary: format!("Pattern matched by rule '{}'", self.id()),
+            fix_behavior: "See rule definition".to_string(),
+            confidence: 0.0,
+            example_input: "(no example)".to_string(),
+            example_output: "(no example)".to_string(),
+        }
+    }
 }
 
 /// Compute 1-indexed line and column from a byte offset in content.
@@ -163,6 +194,7 @@ pub fn line_col_from_offset(content: &str, byte_offset: usize) -> (usize, usize)
 pub fn build_registry(
     allow_symbols: &[String],
     custom_phrases: &[String],
+    _extra_profiles: &[Profile],
 ) -> Vec<Box<dyn Rule>> {
     let mut rules: Vec<Box<dyn Rule>> = Vec::new();
 
@@ -190,6 +222,10 @@ pub fn build_registry(
     rules.push(Box::new(code::TrivialCommentRule));
     rules.push(Box::new(code::DocstringFillerRule::new()));
 
+    // Language pack rules — always registered, gated by Profile::allows()
+    rules.extend(lang_packs::rust_pack_rules());
+    rules.extend(lang_packs::python_pack_rules());
+
     // Custom phrase rules from config
     if !custom_phrases.is_empty() {
         if let Ok(rule) = custom::CustomPhraseRule::new(custom_phrases) {
@@ -208,16 +244,50 @@ pub enum Profile {
     Prose,
     Code,
     Aggressive,
+    /// Rust language-specific rules (stacks on top of Code)
+    #[serde(rename = "rust-pack")]
+    RustPack,
+    /// Python language-specific rules (stacks on top of Code)
+    #[serde(rename = "python-pack")]
+    PythonPack,
 }
 
 impl Profile {
     /// Returns true if the given category is active under this profile.
     pub fn allows(&self, category: Category) -> bool {
         match self {
-            Profile::Conservative => matches!(category, Category::Typographic | Category::Symbol | Category::Custom),
-            Profile::Prose => matches!(category, Category::Typographic | Category::Symbol | Category::Prose | Category::Custom),
-            Profile::Code => matches!(category, Category::Typographic | Category::Symbol | Category::Code | Category::Custom),
-            Profile::Aggressive => true,
+            Profile::Conservative => matches!(category,
+                Category::Typographic | Category::Symbol | Category::Custom
+            ),
+            Profile::Prose => matches!(category,
+                Category::Typographic | Category::Symbol | Category::Prose | Category::Custom
+            ),
+            Profile::Code => matches!(category,
+                Category::Typographic | Category::Symbol | Category::Code | Category::Custom
+            ),
+            Profile::Aggressive => matches!(category,
+                Category::Typographic | Category::Symbol | Category::Prose
+                | Category::Code | Category::Custom
+            ),
+            // Packs include Code + Typographic + Symbol + Custom + PackSpecific
+            Profile::RustPack | Profile::PythonPack => matches!(category,
+                Category::Typographic | Category::Symbol | Category::Code
+                | Category::Custom | Category::PackSpecific
+            ),
+        }
+    }
+
+    /// True if this profile is a language pack (not a base profile).
+    pub fn is_pack(&self) -> bool {
+        matches!(self, Profile::RustPack | Profile::PythonPack)
+    }
+
+    /// Returns an iterator over the language-specific pack categories this profile enables.
+    pub fn pack_tag(&self) -> Option<&'static str> {
+        match self {
+            Profile::RustPack => Some("rust"),
+            Profile::PythonPack => Some("python"),
+            _ => None,
         }
     }
 }
@@ -229,6 +299,8 @@ impl fmt::Display for Profile {
             Profile::Prose => write!(f, "prose"),
             Profile::Code => write!(f, "code"),
             Profile::Aggressive => write!(f, "aggressive"),
+            Profile::RustPack => write!(f, "rust-pack"),
+            Profile::PythonPack => write!(f, "python-pack"),
         }
     }
 }
@@ -242,6 +314,8 @@ impl std::str::FromStr for Profile {
             "prose" => Ok(Profile::Prose),
             "code" => Ok(Profile::Code),
             "aggressive" => Ok(Profile::Aggressive),
+            "rust-pack" => Ok(Profile::RustPack),
+            "python-pack" => Ok(Profile::PythonPack),
             _ => Err(anyhow::anyhow!("unknown profile: {}", s)),
         }
     }

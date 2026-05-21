@@ -14,6 +14,9 @@ pub struct Config {
     pub format: Option<String>,
     pub rules: Option<RulesConfig>,
     pub files: Option<FilesConfig>,
+    /// Additional profiles to stack on top of the base profile.
+    /// e.g. `extra_profiles = ["rust-pack"]`
+    pub extra_profiles: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]

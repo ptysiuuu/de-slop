@@ -9,6 +9,7 @@ pub fn process_file(
     file_ext: Option<&str>,
 ) -> (String, Vec<Match>) {
     let comment_spans = extract_comment_spans(content, file_ext);
+    println!("COMMENT SPANS: {:?}", comment_spans);
     let mut all_matches = Vec::new();
 
     for (registry_index, rule) in rules.iter().enumerate() {
@@ -34,16 +35,20 @@ pub fn process_file(
                 }
             }
 
-            // Expand byte_range for DeleteLine and DeleteBlock to the actual line boundaries
-            // so that overlap resolution and back-to-front processing work correctly.
             if matches!(m.kind, MatchKind::DeleteLine | MatchKind::DeleteBlock) {
                 let start = content[..m.byte_range.start]
                     .rfind('\n')
                     .map(|idx| idx + 1)
                     .unwrap_or(0);
-                let end = content[m.byte_range.end..]
+                    
+                let mut search_end = m.byte_range.end;
+                if search_end > 0 && search_end <= content.len() && content.as_bytes()[search_end - 1] == b'\n' {
+                    search_end -= 1;
+                }
+                
+                let end = content[search_end..]
                     .find('\n')
-                    .map(|idx| m.byte_range.end + idx + 1)
+                    .map(|idx| search_end + idx + 1)
                     .unwrap_or(content.len());
                 m.byte_range = start..end;
             }
@@ -75,6 +80,7 @@ pub fn process_file(
 
     let mut result_content = content.to_string();
     for m in &resolved {
+        println!("APPLYING FIX: {:?}", m);
         if let MatchKind::FlagOnly = m.kind {
             continue;
         }
@@ -92,42 +98,76 @@ fn apply_fix(content: &mut String, m: &Match) {
         }
         MatchKind::DeleteLine | MatchKind::DeleteBlock => {
             content.replace_range(m.byte_range.clone(), "");
-            collapse_blank_lines(content, m.byte_range.start);
+            // After deletion, collapse any run of 3+ consecutive newlines to
+            // exactly 2 (= one blank line). We do this over the whole string
+            // rather than at a fixed offset because the offset is invalidated
+            // by the replace_range call above.
+            collapse_blank_lines(content);
         }
         MatchKind::FlagOnly => {}
     }
 }
 
-fn collapse_blank_lines(content: &mut String, at_offset: usize) {
-    // Expand to find the full span of whitespace containing newlines
+/// Collapse consecutive blank lines (3+ `\n` in a row) to at most 2 (`\n\n`).
+///
+/// This satisfies the spec invariant:
+/// > "DeleteLine and DeleteBlock collapse consecutive blank lines to at most one."
+///
+/// Two consecutive `\n` characters produce exactly one visible blank line, so
+/// `\n\n` is the maximum we allow. Any run of 3+ newlines is replaced with 2.
+fn collapse_blank_lines(content: &mut String) {
+    // Fast path: if there is no triple-newline, nothing to do.
+    if !content.contains("\n\n\n") {
+        return;
+    }
+
+    // Replace all runs of 3+ newlines (possibly mixed with spaces/tabs on
+    // blank lines) with exactly "\n\n".
+    // We do this with a simple state-machine scan to avoid a regex dependency
+    // in a hot path.
+    let mut result = String::with_capacity(content.len());
+    let mut newline_run = 0usize;
+    let mut i = 0;
     let bytes = content.as_bytes();
-    
-    let mut span_start = at_offset;
-    while span_start > 0 {
-        let b = bytes[span_start - 1];
-        if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
-            span_start -= 1;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\n' {
+            newline_run += 1;
+            // Consume any blank line content (spaces/tabs) between newlines
+            // so that "  \n  \n  \n" also collapses correctly.
+            i += 1;
+            // Skip trailing whitespace on the current blank line
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\r') {
+                // Only skip if the next real character is another newline
+                // (i.e. this is a truly blank line, not indented content)
+                let mut j = i;
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'\n' {
+                    i = j; // skip the blank whitespace
+                    break;
+                } else {
+                    break;
+                }
+            }
         } else {
-            break;
+            // Flush accumulated newlines — cap at 2
+            let emit = newline_run.min(2);
+            for _ in 0..emit {
+                result.push('\n');
+            }
+            newline_run = 0;
+            result.push(b as char);
+            i += 1;
         }
     }
-
-    let mut span_end = at_offset;
-    while span_end < bytes.len() {
-        let b = bytes[span_end];
-        if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
-            span_end += 1;
-        } else {
-            break;
-        }
+    // Flush trailing newlines — cap at 1 (no trailing blank lines)
+    let emit = newline_run.min(1);
+    for _ in 0..emit {
+        result.push('\n');
     }
 
-    let span_str = &content[span_start..span_end];
-    let newlines = span_str.chars().filter(|&c| c == '\n').count();
-    
-    // If there are > 2 newlines (which means >= 2 consecutive blank lines)
-    if newlines > 2 {
-        // Collapse to exactly \n\n (which visually represents one blank line)
-        content.replace_range(span_start..span_end, "\n\n");
-    }
+    *content = result;
 }

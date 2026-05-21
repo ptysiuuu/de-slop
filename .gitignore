@@ -25,3 +25,10 @@ Thumbs.db
 # Specific documentation files that should not be published
 DESLOP_CUSTOM_RULES.md
 DESLOP_SPEC.md
+slop_test.md
+slop_test_working.md
+TEST_GUIDE.md
+explain.txt
+test20.sh
+.deslop-rules
+.deslop-rules.bak
