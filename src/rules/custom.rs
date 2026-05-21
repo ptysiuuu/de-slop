@@ -243,8 +243,25 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
                 // Parse field: name: value
                 if let Some(colon_pos) = field_trimmed.find(':') {
                     let field_name = field_trimmed[..colon_pos].trim().to_string();
-                    let field_value = field_trimmed[colon_pos + 1..].trim().to_string();
-                    fields.push((field_name, field_value, i + 1));
+                    let mut field_value = field_trimmed[colon_pos + 1..].trim().to_string();
+                    let line_num = i + 1;
+                    i += 1;
+
+                    // If value starts with """, it's a multiline string. Consume lines until closing """.
+                    if field_value.starts_with("\"\"\"") && !field_value[3..].contains("\"\"\"") {
+                        let mut parts = vec![field_value];
+                        while i < lines.len() {
+                            let ml = lines[i].trim();
+                            parts.push(ml.to_string());
+                            i += 1;
+                            if ml.contains("\"\"\"") {
+                                break;
+                            }
+                        }
+                        field_value = parts.join("\n");
+                    }
+
+                    fields.push((field_name, field_value, line_num));
                 } else {
                     bail!(
                         "{}:{}: expected 'field: value', got: {}",
@@ -253,7 +270,6 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
                         field_trimmed
                     );
                 }
-                i += 1;
             }
 
             // Extract required fields
@@ -270,22 +286,16 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
                         let val = field_value.as_str();
                         // Handle multiline pattern
                         if val.starts_with("\"\"\"") {
-                            let mut parts = vec![val.strip_prefix("\"\"\"").unwrap().to_string()];
-                            // Collect until closing """
-                            while i < lines.len() {
-                                let ml = lines[i].trim();
-                                if ml.contains("\"\"\"") {
-                                    let end_part = ml.strip_suffix("\"\"\"").unwrap_or(ml);
-                                    if !end_part.is_empty() {
-                                        parts.push(end_part.to_string());
-                                    }
-                                    i += 1;
-                                    break;
-                                }
-                                parts.push(ml.to_string());
-                                i += 1;
-                            }
-                            let joined = parts.join("");
+                            // Extract content between the first """ and the last """
+                            let start_idx = 3;
+                            let end_idx = val.rfind("\"\"\"").unwrap_or(val.len());
+                            let content = if end_idx > start_idx {
+                                &val[start_idx..end_idx]
+                            } else {
+                                &val[start_idx..]
+                            };
+                            // We need to strip spaces but joining lines without spaces is better for regex
+                            let joined = content.lines().map(|l| l.trim()).collect::<Vec<_>>().join("");
                             match_pattern = Some(joined);
                         } else {
                             match_pattern = Some(strip_quotes(val).to_string());

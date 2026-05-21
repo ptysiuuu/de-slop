@@ -20,7 +20,7 @@ pub fn process_file(
         }
 
         let rule_matches = rule.check(content, Some(&comment_spans));
-        for m in rule_matches {
+        for mut m in rule_matches {
             if m.confidence < min_confidence {
                 continue;
             }
@@ -32,6 +32,20 @@ pub fn process_file(
                 if !inside_comment {
                     continue;
                 }
+            }
+
+            // Expand byte_range for DeleteLine and DeleteBlock to the actual line boundaries
+            // so that overlap resolution and back-to-front processing work correctly.
+            if matches!(m.kind, MatchKind::DeleteLine | MatchKind::DeleteBlock) {
+                let start = content[..m.byte_range.start]
+                    .rfind('\n')
+                    .map(|idx| idx + 1)
+                    .unwrap_or(0);
+                let end = content[m.byte_range.end..]
+                    .find('\n')
+                    .map(|idx| m.byte_range.end + idx + 1)
+                    .unwrap_or(content.len());
+                m.byte_range = start..end;
             }
 
             all_matches.push((registry_index, m));
@@ -76,29 +90,9 @@ fn apply_fix(content: &mut String, m: &Match) {
         MatchKind::Replace(s) => {
             content.replace_range(m.byte_range.clone(), s);
         }
-        MatchKind::DeleteLine => {
-            let start = content[..m.byte_range.start]
-                .rfind('\n')
-                .map(|idx| idx + 1)
-                .unwrap_or(0);
-            let end = content[m.byte_range.start..]
-                .find('\n')
-                .map(|idx| m.byte_range.start + idx + 1)
-                .unwrap_or(content.len());
-            content.replace_range(start..end, "");
-            collapse_blank_lines(content, start);
-        }
-        MatchKind::DeleteBlock => {
-            let start = content[..m.byte_range.start]
-                .rfind('\n')
-                .map(|idx| idx + 1)
-                .unwrap_or(0);
-            let end = content[m.byte_range.end..]
-                .find('\n')
-                .map(|idx| m.byte_range.end + idx + 1)
-                .unwrap_or(content.len());
-            content.replace_range(start..end, "");
-            collapse_blank_lines(content, start);
+        MatchKind::DeleteLine | MatchKind::DeleteBlock => {
+            content.replace_range(m.byte_range.clone(), "");
+            collapse_blank_lines(content, m.byte_range.start);
         }
         MatchKind::FlagOnly => {}
     }
