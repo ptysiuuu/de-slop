@@ -9,7 +9,6 @@ pub fn process_file(
     file_ext: Option<&str>,
 ) -> (String, Vec<Match>) {
     let comment_spans = extract_comment_spans(content, file_ext);
-    println!("COMMENT SPANS: {:?}", comment_spans);
     let mut all_matches = Vec::new();
 
     for (registry_index, rule) in rules.iter().enumerate() {
@@ -79,12 +78,19 @@ pub fn process_file(
     resolved.sort_by(|a, b| b.byte_range.start.cmp(&a.byte_range.start));
 
     let mut result_content = content.to_string();
+    let mut needs_collapse = false;
     for m in &resolved {
-        println!("APPLYING FIX: {:?}", m);
         if let MatchKind::FlagOnly = m.kind {
             continue;
         }
+        if matches!(m.kind, MatchKind::DeleteLine | MatchKind::DeleteBlock) {
+            needs_collapse = true;
+        }
         apply_fix(&mut result_content, m);
+    }
+    
+    if needs_collapse {
+        collapse_blank_lines(&mut result_content);
     }
 
     resolved.sort_by_key(|m| m.byte_range.start);
@@ -98,11 +104,6 @@ fn apply_fix(content: &mut String, m: &Match) {
         }
         MatchKind::DeleteLine | MatchKind::DeleteBlock => {
             content.replace_range(m.byte_range.clone(), "");
-            // After deletion, collapse any run of 3+ consecutive newlines to
-            // exactly 2 (= one blank line). We do this over the whole string
-            // rather than at a fixed offset because the offset is invalidated
-            // by the replace_range call above.
-            collapse_blank_lines(content);
         }
         MatchKind::FlagOnly => {}
     }
