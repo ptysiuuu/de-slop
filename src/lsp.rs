@@ -12,11 +12,18 @@
 
 use crate::detector::detect_file_type;
 use crate::engine::process_file;
-use crate::rules::{Match, MatchKind, Rule};
+use crate::rules::{build_registry, Match, MatchKind, Profile, Rule};
 use anyhow::Result;
 use lsp_server::{Connection, Message, Response};
 use lsp_types::*;
 use std::collections::HashMap;
+
+#[derive(serde::Deserialize, Default)]
+struct InitOptions {
+    profile: Option<String>,
+    #[serde(rename = "minConfidence")]
+    min_confidence: Option<f32>,
+}
 
 // LSP notification method strings
 const DID_OPEN: &str = "textDocument/didOpen";
@@ -25,7 +32,15 @@ const DID_CLOSE: &str = "textDocument/didClose";
 const PUBLISH_DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
 
 /// Run the LSP server. Blocks until the client sends `shutdown` + `exit`.
-pub fn run_lsp_server(rules: Vec<Box<dyn Rule>>, min_confidence: f32) -> Result<()> {
+///
+/// `allow_symbols` and `custom_phrases` come from the project config and are
+/// forwarded to `build_registry`. The client may override `profile` and
+/// `min_confidence` via `initializationOptions` in the LSP handshake.
+pub fn run_lsp_server(
+    allow_symbols: Vec<String>,
+    custom_phrases: Vec<String>,
+    min_confidence: f32,
+) -> Result<()> {
     // Create a connection on stdin/stdout (standard LSP transport)
     let (connection, io_threads) = Connection::stdio();
 
@@ -34,14 +49,35 @@ pub fn run_lsp_server(rules: Vec<Box<dyn Rule>>, min_confidence: f32) -> Result<
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::FULL,
         )),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..Default::default()
     };
 
-    let init_params = connection.initialize(serde_json::to_value(server_capabilities)?)?;
-    let _init_params: InitializeParams = serde_json::from_value(init_params)?;
+    let init_params_raw = connection.initialize(serde_json::to_value(server_capabilities)?)?;
+    let init_params: InitializeParams = serde_json::from_value(init_params_raw.clone())?;
 
-    // Track open documents
-    let mut documents: HashMap<Uri, String> = HashMap::new();
+    // Parse initializationOptions sent by the client (e.g., VS Code extension).
+    let opts: InitOptions = init_params
+        .initialization_options
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let profile = opts
+        .profile
+        .as_deref()
+        .and_then(|s| s.parse::<Profile>().ok())
+        .unwrap_or(Profile::Prose);
+    let effective_min_confidence = opts.min_confidence.unwrap_or(min_confidence);
+
+    // Build the rule registry for this session using the resolved profile.
+    let mut session_rules = build_registry(&allow_symbols, &custom_phrases, &[]);
+    session_rules.retain(|r| profile.allows(r.category()));
+    let rules: Vec<Box<dyn Rule>> = session_rules;
+
+    // Track open documents and their resolved matches.
+    // Uri has interior mutability in its authority component but we never mutate keys.
+    #[allow(clippy::mutable_key_type)]
+    let mut documents: HashMap<Uri, (String, Vec<Match>)> = HashMap::new();
 
     // Main message loop
     for msg in &connection.receiver {
@@ -49,6 +85,10 @@ pub fn run_lsp_server(rules: Vec<Box<dyn Rule>>, min_confidence: f32) -> Result<
             Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
                     break;
+                }
+                if req.method == "textDocument/codeAction" {
+                    handle_code_action(&connection, req, &documents)?;
+                    continue;
                 }
                 // We don't handle other requests for now
                 let resp = Response::new_err(
@@ -64,7 +104,7 @@ pub fn run_lsp_server(rules: Vec<Box<dyn Rule>>, min_confidence: f32) -> Result<
                     notif,
                     &mut documents,
                     &rules,
-                    min_confidence,
+                    effective_min_confidence,
                 )?;
             }
             Message::Response(_) => {
@@ -77,10 +117,11 @@ pub fn run_lsp_server(rules: Vec<Box<dyn Rule>>, min_confidence: f32) -> Result<
     Ok(())
 }
 
+#[allow(clippy::mutable_key_type)]
 fn handle_notification(
     connection: &Connection,
     notif: lsp_server::Notification,
-    documents: &mut HashMap<Uri, String>,
+    documents: &mut HashMap<Uri, (String, Vec<Match>)>,
     rules: &[Box<dyn Rule>],
     min_confidence: f32,
 ) -> Result<()> {
@@ -89,8 +130,8 @@ fn handle_notification(
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
         let language_id = params.text_document.language_id.clone();
-        documents.insert(uri.clone(), text.clone());
-        publish_diagnostics(connection, &uri, &text, &language_id, rules, min_confidence)?;
+        let matches = publish_diagnostics(connection, &uri, &text, &language_id, rules, min_confidence)?;
+        documents.insert(uri, (text, matches));
     } else if notif.method == DID_CHANGE {
         let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
         let uri = params.text_document.uri.clone();
@@ -103,8 +144,8 @@ fn handle_notification(
                 .next()
                 .unwrap_or("txt")
                 .to_string();
-            documents.insert(uri.clone(), text.clone());
-            publish_diagnostics(connection, &uri, &text, &language_id, rules, min_confidence)?;
+            let matches = publish_diagnostics(connection, &uri, &text, &language_id, rules, min_confidence)?;
+            documents.insert(uri, (text, matches));
         }
     } else if notif.method == DID_CLOSE {
         let params: DidCloseTextDocumentParams = serde_json::from_value(notif.params)?;
@@ -134,7 +175,7 @@ fn publish_diagnostics(
     language_id: &str,
     rules: &[Box<dyn Rule>],
     min_confidence: f32,
-) -> Result<()> {
+) -> Result<Vec<Match>> {
     // Detect file type from URI string
     let uri_str = uri.to_string();
     // The URI path is the part after the scheme+authority
@@ -168,7 +209,7 @@ fn publish_diagnostics(
         ),
     ))?;
 
-    Ok(())
+    Ok(matches)
 }
 
 fn match_to_diagnostic(content: &str, m: &Match) -> Diagnostic {
@@ -223,4 +264,93 @@ fn byte_offset_to_lsp_position(content: &str, byte_offset: usize) -> (usize, usi
         }
     }
     (line, col)
+}
+
+#[allow(clippy::mutable_key_type)]
+fn handle_code_action(
+    connection: &Connection,
+    req: lsp_server::Request,
+    documents: &HashMap<Uri, (String, Vec<Match>)>,
+) -> Result<()> {
+    let params: CodeActionParams = serde_json::from_value(req.params)?;
+    let uri = params.text_document.uri;
+    
+    let mut code_actions = Vec::new();
+    
+    if let Some((text, matches)) = documents.get(&uri) {
+        let req_start = lsp_position_to_byte_offset(text, &params.range.start);
+        let req_end = lsp_position_to_byte_offset(text, &params.range.end);
+        
+        for m in matches {
+            if matches!(m.kind, MatchKind::FlagOnly) {
+                continue;
+            }
+            
+            if m.byte_range.start <= req_end && m.byte_range.end >= req_start {
+                let title = format!("Apply fix for {}", m.rule_id);
+                
+                let mut changes = HashMap::new();
+                let (start_line, start_char) = byte_offset_to_lsp_position(text, m.byte_range.start);
+                let (end_line, end_char) = byte_offset_to_lsp_position(text, m.byte_range.end);
+                
+                let new_text = match &m.kind {
+                    MatchKind::Replace(s) => s.clone(),
+                    MatchKind::DeleteLine | MatchKind::DeleteBlock => String::new(),
+                    MatchKind::FlagOnly => unreachable!(),
+                };
+
+                let edit = TextEdit {
+                    range: Range {
+                        start: Position { line: start_line as u32, character: start_char as u32 },
+                        end: Position { line: end_line as u32, character: end_char as u32 },
+                    },
+                    new_text,
+                };
+
+                changes.insert(uri.clone(), vec![edit]);
+
+                let action = CodeAction {
+                    title,
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    diagnostics: None,
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        document_changes: None,
+                        change_annotations: None,
+                    }),
+                    command: None,
+                    is_preferred: Some(true),
+                    disabled: None,
+                    data: None,
+                };
+                code_actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+        }
+    }
+    
+    let result = serde_json::to_value(code_actions)?;
+    let resp = Response::new_ok(req.id, result);
+    connection.sender.send(Message::Response(resp))?;
+    
+    Ok(())
+}
+
+fn lsp_position_to_byte_offset(content: &str, pos: &Position) -> usize {
+    let mut line = 0;
+    let mut col = 0;
+    for (i, ch) in content.char_indices() {
+        if line == pos.line as usize && col == pos.character as usize {
+            return i;
+        }
+        if line > pos.line as usize {
+            return i;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf16();
+        }
+    }
+    content.len()
 }

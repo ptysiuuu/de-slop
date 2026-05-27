@@ -331,3 +331,83 @@ fn test_lsp_subcommand_has_help() {
                 .or(predicate::str::contains("Language Server"))
         );
 }
+
+/// After `didOpen` with sloppy content, a `textDocument/codeAction` request
+/// for the diagnostic range must return at least one CodeAction with a
+/// non-null `edit` field.
+#[test]
+fn test_lsp_code_action_returns_edit() {
+    let mut child = spawn_lsp();
+    let stdin = child.stdin.as_mut().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    // initialize
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "processId": null, "rootUri": null, "capabilities": {} }
+    });
+    stdin.write_all(lsp_message(&init.to_string()).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let _init_resp = read_lsp_response(&mut reader);
+
+    // initialized
+    let initialized = serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}});
+    stdin.write_all(lsp_message(&initialized.to_string()).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+
+    // didOpen with content containing an em-dash (Replace kind — produces a fix)
+    let did_open = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///tmp/codeaction_test.md",
+                "languageId": "markdown",
+                "version": 1,
+                "text": "Hello \u{2014} world.\n"
+            }
+        }
+    });
+    stdin.write_all(lsp_message(&did_open.to_string()).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Read publishDiagnostics and grab the first diagnostic's range
+    let notification = read_lsp_response(&mut reader);
+    assert_eq!(notification["method"], "textDocument/publishDiagnostics");
+    let diagnostics = notification["params"]["diagnostics"].as_array().unwrap();
+    assert!(!diagnostics.is_empty(), "Expected at least one diagnostic for em-dash content");
+    let diag_range = &diagnostics[0]["range"];
+
+    // Send codeAction request for the diagnostic range
+    let code_action_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": "file:///tmp/codeaction_test.md" },
+            "range": diag_range,
+            "context": { "diagnostics": [diagnostics[0].clone()], "only": [] }
+        }
+    });
+    stdin.write_all(lsp_message(&code_action_req.to_string()).as_bytes()).unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let response = read_lsp_response(&mut reader);
+    assert_eq!(response["id"], 2, "Response ID should match request");
+    let actions = response["result"].as_array().expect("Expected array of code actions");
+    assert!(!actions.is_empty(), "Expected at least one code action for em-dash diagnostic");
+
+    let first_action = &actions[0];
+    assert!(
+        !first_action["edit"].is_null(),
+        "Code action must have a non-null edit: {:?}",
+        first_action
+    );
+
+    child.kill().unwrap();
+}

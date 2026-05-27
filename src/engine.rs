@@ -1,5 +1,6 @@
 use crate::detector::{extract_comment_spans, FileType};
 use crate::rules::{Category, FileTypeFilter, Match, MatchKind, Rule};
+use std::cmp::Reverse;
 
 pub fn process_file(
     content: &str,
@@ -75,11 +76,21 @@ pub fn process_file(
         i = j;
     }
 
-    resolved.sort_by(|a, b| b.byte_range.start.cmp(&a.byte_range.start));
+    let result_content = apply_matches(content, &resolved);
 
+    resolved.sort_by_key(|m| m.byte_range.start);
+    (result_content, resolved)
+}
+
+pub fn apply_matches(content: &str, matches: &[Match]) -> String {
     let mut result_content = content.to_string();
     let mut needs_collapse = false;
-    for m in &resolved {
+    
+    // Sort reverse byte order for application
+    let mut sorted_matches = matches.to_vec();
+    sorted_matches.sort_by_key(|m| Reverse(m.byte_range.start));
+
+    for m in &sorted_matches {
         if let MatchKind::FlagOnly = m.kind {
             continue;
         }
@@ -93,8 +104,7 @@ pub fn process_file(
         collapse_blank_lines(&mut result_content);
     }
 
-    resolved.sort_by_key(|m| m.byte_range.start);
-    (result_content, resolved)
+    result_content
 }
 
 fn apply_fix(content: &mut String, m: &Match) {
@@ -138,19 +148,15 @@ fn collapse_blank_lines(content: &mut String) {
             // Consume any blank line content (spaces/tabs) between newlines
             // so that "  \n  \n  \n" also collapses correctly.
             i += 1;
-            // Skip trailing whitespace on the current blank line
-            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\r') {
-                // Only skip if the next real character is another newline
-                // (i.e. this is a truly blank line, not indented content)
+            // Skip trailing whitespace on the current blank line only if it
+            // leads directly to another newline (i.e. this is a truly blank line).
+            if i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\r') {
                 let mut j = i;
                 while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\r') {
                     j += 1;
                 }
                 if j < bytes.len() && bytes[j] == b'\n' {
-                    i = j; // skip the blank whitespace
-                    break;
-                } else {
-                    break;
+                    i = j;
                 }
             }
         } else {

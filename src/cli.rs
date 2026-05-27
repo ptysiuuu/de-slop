@@ -119,9 +119,9 @@ pub enum ProfileArg {
     PythonPack,
 }
 
-impl Into<Profile> for ProfileArg {
-    fn into(self) -> Profile {
-        match self {
+impl From<ProfileArg> for Profile {
+    fn from(val: ProfileArg) -> Self {
+        match val {
             ProfileArg::Conservative => Profile::Conservative,
             ProfileArg::Prose => Profile::Prose,
             ProfileArg::Code => Profile::Code,

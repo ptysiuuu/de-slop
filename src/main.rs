@@ -1,15 +1,5 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-mod cli;
-mod config;
-mod detector;
-mod diff;
-mod engine;
-mod interactive;
-mod lsp;
-mod report;
-mod rules;
-mod scanner;
-mod watch;
+
+
 
 use anyhow::Result;
 use clap::Parser;
@@ -19,16 +9,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use cli::{Cli, Commands, FormatArg};
-use config::load_config;
-use detector::detect_file_type;
-use engine::process_file;
-use report::{
+use deslop::cli::{Cli, Commands, FormatArg};
+use deslop::config::load_config;
+use deslop::detector::detect_file_type;
+use deslop::engine::{apply_matches, process_file};
+use deslop::interactive;
+use deslop::diff;
+use deslop::lsp;
+use deslop::watch;
+use deslop::report::{
     print_coverage_stats, print_explain_rules, print_human_report, print_sentence_report,
     print_summary, JsonFileReport, JsonReport, JsonScore, JsonSummary,
 };
-use rules::{build_registry, custom, Profile, Rule};
-use scanner::{is_binary, Scanner};
+use deslop::rules::{build_registry, custom, Profile, Rule};
+use deslop::scanner::{is_binary, Scanner};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -171,13 +165,6 @@ fn main() -> Result<()> {
         final_rules.push(r);
     }
     
-    // DEBUG: print final rules
-    if let Some(Commands::ExplainRules) = &cli.command {
-        for r in &final_rules {
-            println!("DEBUG RULE: {}", r.id());
-        }
-    }
-
     let all_rule_ids: Vec<String> = final_rules.iter().map(|r| r.id().to_string()).collect();
 
     // ── explain-rules subcommand ──────────────────────────────────────────────
@@ -190,7 +177,7 @@ fn main() -> Result<()> {
     if let Some(Commands::Lsp { log_level }) = &cli.command {
         std::env::set_var("RUST_LOG", format!("deslop={}", log_level));
         env_logger::init();
-        lsp::run_lsp_server(final_rules, min_confidence)?;
+        lsp::run_lsp_server(allow_symbols, custom_phrases, min_confidence)?;
         std::process::exit(0);
     }
 
@@ -214,11 +201,21 @@ fn main() -> Result<()> {
         .unwrap_or_default();
 
     let path_str = cli.path.unwrap_or_else(|| ".".to_string());
-    let scanner = Scanner::discover(Path::new(&path_str), cli.recursive, &excludes)?;
+    let scanner = match Scanner::discover(Path::new(&path_str), cli.recursive, &excludes) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("deslop: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    if scanner.files().is_empty() {
+        eprintln!("deslop: no files found in '{}'", path_str);
+        std::process::exit(2);
+    }
 
     let results: Mutex<Vec<_>> = Mutex::new(Vec::new());
     let char_counts: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
-    let content_store: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 
     scanner.files().par_iter().for_each(|path| {
         let content_bytes = match fs::read(path) {
@@ -239,8 +236,6 @@ fn main() -> Result<()> {
         let (modified, matches) = process_file(&content, &final_rules, file_type, min_confidence, ext);
 
         if !matches.is_empty() {
-            let path_key = path.to_string_lossy().to_string();
-            content_store.lock().unwrap().insert(path_key.clone(), content.clone());
             results.lock().unwrap().push((path.clone(), content, modified, matches));
         }
     });
@@ -251,6 +246,7 @@ fn main() -> Result<()> {
     let mut exit_code = 0;
     let mut total_matches = 0;
     let mut worst_rule_counts: HashMap<String, usize> = HashMap::new();
+    let mut max_density = 0.0_f32;
 
     let mut json_files = Vec::new();
     let mut simplified_results: Vec<(String, Vec<_>)> = Vec::new();
@@ -259,10 +255,7 @@ fn main() -> Result<()> {
     for (path, original, mut modified, mut matches) in results {
         if cli.interactive && !cli.dry_run {
             matches = interactive::run_interactive(&path.to_string_lossy(), &original, matches.clone())?;
-            let ext = path.extension().and_then(|s| s.to_str());
-            let file_type = detect_file_type(&path.to_string_lossy(), ext, cli.lang.as_deref());
-            let (new_mod, _) = engine::process_file(&original, &final_rules, file_type, min_confidence, ext);
-            modified = new_mod;
+            modified = apply_matches(&original, &matches);
         }
 
         total_matches += matches.len();
@@ -278,6 +271,16 @@ fn main() -> Result<()> {
 
         simplified_results.push((path_str.clone(), matches.clone()));
 
+        let char_count = char_counts.lock().unwrap().get(&path_str).copied().unwrap_or(0);
+        let density = if char_count > 0 {
+            (matches.len() as f32 / char_count as f32) * 1000.0
+        } else {
+            0.0
+        };
+        if density > max_density {
+            max_density = density;
+        }
+
         if cli.format == FormatArg::Human {
             print_human_report(&path_str, &matches, cli.explain);
             if cli.diff {
@@ -285,12 +288,6 @@ fn main() -> Result<()> {
                 println!("{}", d);
             }
         } else if cli.format == FormatArg::Json {
-            let char_count = char_counts.lock().unwrap().get(&path_str).copied().unwrap_or(0);
-            let density = if char_count > 0 {
-                (matches.len() as f32 / char_count as f32) * 1000.0
-            } else {
-                0.0
-            };
             json_files.push(JsonFileReport {
                 path: path_str.clone(),
                 score: JsonScore { density, total_matches: matches.len() },
@@ -333,6 +330,7 @@ fn main() -> Result<()> {
                 &simplified_results,
                 scanner.files().len(),
                 &char_counts.into_inner().unwrap(),
+                cli.dry_run,
             );
             // Coverage stats
             print_coverage_stats(&all_rule_ids, &worst_rule_counts);
@@ -348,8 +346,8 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Some(_t) = cli.threshold {
-        if total_matches > 0 {
+    if let Some(t) = cli.threshold {
+        if max_density > t {
             exit_code = 1;
         }
     }

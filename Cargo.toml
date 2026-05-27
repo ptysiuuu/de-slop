@@ -9,22 +9,17 @@ license = "MIT"
 name = "deslop"
 path = "src/main.rs"
 
+[lib]
+name = "deslop"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-crossterm = "0.28"
-env_logger = "0.11"
 globset = "0.4"
 log = "0.4"
-lsp-server = "0.7"
-lsp-types = "0.97"
 memchr = "2"
-notify = "6"
-notify-debouncer-mini = "0.4"
 once_cell = "1"
-owo-colors = "4"
 phf = { version = "0.11", features = ["macros"] }
-ratatui = "0.29"
 rayon = "1"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +27,17 @@ serde_json = "1"
 serde_yaml = "0.9"
 similar = "2"
 toml = "0.8"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+env_logger = "0.11"
+lsp-server = "0.7"
+lsp-types = "0.97"
+notify = "6"
+notify-debouncer-mini = "0.4"
+owo-colors = "4"
+ratatui = "0.29"
 walkdir = "2"
 
 [dev-dependencies]

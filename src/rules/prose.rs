@@ -12,6 +12,12 @@ static FILLER_OPENERS_2: Lazy<Regex> = Lazy::new(|| {
 
 pub struct FillerOpenersRule;
 
+impl Default for FillerOpenersRule {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl FillerOpenersRule {
     pub fn new() -> Self {
         Self
@@ -66,10 +72,16 @@ impl Rule for FillerOpenersRule {
 }
 
 static SYCOPHANTIC_CLOSERS: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?im)\b(?:I hope this helps|Feel free to ask|Let me know if you have questions|Don't hesitate to reach out|Hope that clarifies things)[.,!]?").unwrap()
+    Regex::new(r"(?im)\b(?:I hope this helps|Feel free to ask|Let me know if you have questions|Don't hesitate to reach out|Hope that clarifies things)[.,!]?\s*").unwrap()
 });
 
 pub struct SycophanticClosersRule;
+
+impl Default for SycophanticClosersRule {
+    fn default() -> Self {
+        Self
+    }
+}
 
 impl SycophanticClosersRule {
     pub fn new() -> Self {
@@ -104,8 +116,8 @@ impl Rule for SycophanticClosersRule {
                 col,
                 original: m.as_str().to_string(),
                 suggestion: String::new(),
-                kind: MatchKind::DeleteLine,
-                description: "Sycophantic closer. Delete the sentence.".to_string(),
+                kind: MatchKind::Replace(String::new()),
+                description: "Sycophantic closer. Delete the phrase.".to_string(),
             });
         }
         matches
@@ -117,6 +129,12 @@ static HEDGES: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub struct HedgesRule;
+
+impl Default for HedgesRule {
+    fn default() -> Self {
+        Self
+    }
+}
 
 impl HedgesRule {
     pub fn new() -> Self {
@@ -164,6 +182,12 @@ static TRANSITION_PADDING: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub struct TransitionPaddingRule;
+
+impl Default for TransitionPaddingRule {
+    fn default() -> Self {
+        Self
+    }
+}
 
 impl TransitionPaddingRule {
     pub fn new() -> Self {
@@ -263,7 +287,7 @@ impl Rule for HollowIntensifiersRule {
                 // Preserve casing
                 let replacement = if word.chars().all(|c| c.is_uppercase()) {
                     synonym.to_uppercase()
-                } else if word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                } else if word.chars().next().is_some_and(|c| c.is_uppercase()) {
                     let mut chars = synonym.chars();
                     match chars.next() {
                         None => String::new(),

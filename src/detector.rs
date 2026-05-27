@@ -3,7 +3,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+
 pub enum FileType {
     Code,
     Prose,

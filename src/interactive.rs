@@ -52,7 +52,10 @@ pub fn run_interactive(file_path: &str, content: &str, matches: Vec<Match>) -> R
         return Ok(Vec::new());
     }
 
-    enable_raw_mode()?;
+    // In non-TTY mode (e.g., pipes or tests), raw mode is unavailable — skip interactive.
+    if enable_raw_mode().is_err() {
+        return Ok(Vec::new());
+    }
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
@@ -198,8 +201,7 @@ pub fn run_interactive(file_path: &str, content: &str, matches: Vec<Match>) -> R
                     }
                     InteractiveAction::AcceptAll => {
                         accepted.push(m.clone());
-                        for j in (i + 1)..matches.len() {
-                            let next_m = &matches[j];
+                        for next_m in matches.iter().skip(i + 1) {
                             if !matches!(next_m.kind, MatchKind::FlagOnly) && !skip_rule.contains(&next_m.rule_id) {
                                 accepted.push(next_m.clone());
                             }

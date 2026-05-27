@@ -286,3 +286,155 @@ pub fn python_pack_rules() -> Vec<Box<dyn Rule>> {
         Box::new(PythonNumpyEmptySectionRule),
     ]
 }
+
+// ── JS/TS pack ───────────────────────────────────────────────────────────────
+
+pub struct JsTsBoilerplateRule;
+
+static JSTS_BOILERPLATE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?im)^[ \t]*\*[ \t]*@param[ \t]+[a-zA-Z0-9_]+[ \t]+(?:The|A|An)[ \t]+(?:data|input|output|result)\.?").unwrap()
+});
+
+impl Rule for JsTsBoilerplateRule {
+    fn id(&self) -> &str { "jsts-boilerplate" }
+    fn category(&self) -> Category { Category::PackSpecific }
+    fn file_type_filter(&self) -> FileTypeFilter { FileTypeFilter::CodeOnly }
+    
+    fn check(&self, content: &str, _spans: Option<&[Span]>) -> Vec<Match> {
+        let mut matches = Vec::new();
+        for m in JSTS_BOILERPLATE.find_iter(content) {
+            let (line, col) = line_col_from_offset(content, m.start());
+            matches.push(Match {
+                rule_id: self.id().to_string(),
+                category: Category::PackSpecific,
+                severity: Severity::Warn,
+                confidence: 0.85,
+                byte_range: m.start()..m.end(),
+                line, col,
+                original: m.as_str().trim().to_string(),
+                suggestion: String::new(),
+                kind: MatchKind::DeleteLine,
+                description: "JSDoc boilerplate with no real information. Remove it.".to_string(),
+            });
+        }
+        matches
+    }
+}
+
+pub struct JsTsConsoleLogRule;
+
+static JSTS_CONSOLE_LOG: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?im)^[ \t]*console\.log\(['"](here|test|debug|\w+ing)['"]\);?[ \t]*$"#).unwrap()
+});
+
+impl Rule for JsTsConsoleLogRule {
+    fn id(&self) -> &str { "jsts-console-log" }
+    fn category(&self) -> Category { Category::PackSpecific }
+    fn file_type_filter(&self) -> FileTypeFilter { FileTypeFilter::CodeOnly }
+    
+    fn check(&self, content: &str, _spans: Option<&[Span]>) -> Vec<Match> {
+        let mut matches = Vec::new();
+        for m in JSTS_CONSOLE_LOG.find_iter(content) {
+            let (line, col) = line_col_from_offset(content, m.start());
+            matches.push(Match {
+                rule_id: self.id().to_string(),
+                category: Category::PackSpecific,
+                severity: Severity::Warn,
+                confidence: 0.90,
+                byte_range: m.start()..m.end(),
+                line, col,
+                original: m.as_str().trim().to_string(),
+                suggestion: String::new(),
+                kind: MatchKind::DeleteLine,
+                description: "Leftover debug console.log(). Remove it.".to_string(),
+            });
+        }
+        matches
+    }
+}
+
+pub fn js_ts_pack_rules() -> Vec<Box<dyn Rule>> {
+    vec![
+        Box::new(JsTsBoilerplateRule),
+        Box::new(JsTsConsoleLogRule),
+    ]
+}
+
+// ── Go pack ──────────────────────────────────────────────────────────────────
+
+pub struct GoVerboseDocRule;
+
+static GO_VERBOSE_DOC: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?im)^[ \t]*//[ \t]+[A-Z][a-zA-Z0-9_]*[ \t]+(?:returns|handles|processes|is|creates|initializes)[ \t]+(?:the|a|an)[ \t]+[A-Z][a-zA-Z0-9_]*\.?").unwrap()
+});
+
+impl Rule for GoVerboseDocRule {
+    fn id(&self) -> &str { "go-verbose-doc" }
+    fn category(&self) -> Category { Category::PackSpecific }
+    fn file_type_filter(&self) -> FileTypeFilter { FileTypeFilter::CodeOnly }
+    
+    fn check(&self, content: &str, _spans: Option<&[Span]>) -> Vec<Match> {
+        let mut matches = Vec::new();
+        for m in GO_VERBOSE_DOC.find_iter(content) {
+            let (line, col) = line_col_from_offset(content, m.start());
+            matches.push(Match {
+                rule_id: self.id().to_string(),
+                category: Category::PackSpecific,
+                severity: Severity::Warn,
+                confidence: 0.85,
+                byte_range: m.start()..m.end(),
+                line, col,
+                original: m.as_str().trim().to_string(),
+                suggestion: String::new(),
+                kind: MatchKind::DeleteLine,
+                description: "Go comment restates function name trivially. Add real docs or remove.".to_string(),
+            });
+        }
+        matches
+    }
+}
+
+pub fn go_pack_rules() -> Vec<Box<dyn Rule>> {
+    vec![Box::new(GoVerboseDocRule)]
+}
+
+// ── SQL pack ─────────────────────────────────────────────────────────────────
+
+pub struct SqlVerboseDocRule;
+
+static SQL_VERBOSE_DOC: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?im)^[ \t]*--[ \t]*Selects? (?:all|the) [a-zA-Z0-9_]+[ \t]*\n[ \t]*SELECT \* FROM [a-zA-Z0-9_]+").unwrap()
+});
+
+impl Rule for SqlVerboseDocRule {
+    fn id(&self) -> &str { "sql-verbose-doc" }
+    fn category(&self) -> Category { Category::PackSpecific }
+    fn file_type_filter(&self) -> FileTypeFilter { FileTypeFilter::CodeOnly }
+    
+    fn check(&self, content: &str, _spans: Option<&[Span]>) -> Vec<Match> {
+        let mut matches = Vec::new();
+        for c in SQL_VERBOSE_DOC.captures_iter(content) {
+            let m = c.get(0).unwrap();
+            // Just delete the comment line part, not the SELECT part
+            let comment_end = content[m.start()..m.end()].find('\n').unwrap() + m.start();
+            let (line, col) = line_col_from_offset(content, m.start());
+            matches.push(Match {
+                rule_id: self.id().to_string(),
+                category: Category::PackSpecific,
+                severity: Severity::Warn,
+                confidence: 0.90,
+                byte_range: m.start()..comment_end,
+                line, col,
+                original: content[m.start()..comment_end].trim().to_string(),
+                suggestion: String::new(),
+                kind: MatchKind::DeleteLine,
+                description: "Trivial SQL comment restates SELECT *. Remove it.".to_string(),
+            });
+        }
+        matches
+    }
+}
+
+pub fn sql_pack_rules() -> Vec<Box<dyn Rule>> {
+    vec![Box::new(SqlVerboseDocRule)]
+}

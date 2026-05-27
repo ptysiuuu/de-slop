@@ -43,20 +43,23 @@ pub fn print_human_report(
     for m in matches {
         let cat_str = format!("[{}]", m.category);
         let conf_str = format!("[{:.2}]", m.confidence);
-        
+
+        let original_flat = m.original.replace('\n', "↵");
+
         let action_str = match &m.kind {
             MatchKind::Replace(s) => {
-                if s.is_empty() {
-                    format!("\"{}\" → (deleted)", m.original.red())
+                let s_flat = s.replace('\n', "↵");
+                if s_flat.is_empty() {
+                    format!("\"{}\" → (deleted)", original_flat.red())
                 } else {
-                    format!("\"{}\" → \"{}\"", m.original.red(), s.green())
+                    format!("\"{}\" → \"{}\"", original_flat.red(), s_flat.green())
                 }
             }
             MatchKind::DeleteLine | MatchKind::DeleteBlock => {
-                format!("{} → (deleted)", m.original.trim().red())
+                format!("{} → (deleted)", original_flat.trim().red())
             }
             MatchKind::FlagOnly => {
-                format!("\"{}\" (flagged)", m.original.yellow())
+                format!("\"{}\" (flagged)", original_flat.yellow())
             }
         };
 
@@ -114,7 +117,7 @@ fn split_sentences(content: &str) -> Vec<(String, usize, usize)> {
         let next_is_space_or_end = content[byte_offset..]
             .chars()
             .next()
-            .map_or(true, |c| c.is_whitespace());
+            .is_none_or(|c| c.is_whitespace());
 
         if ends_sentence && next_is_space_or_end && !current.trim().is_empty() {
             let trimmed = current.trim().to_string();
@@ -222,8 +225,10 @@ pub fn print_summary(
     results: &[(String, Vec<Match>)],
     _total_files_scanned: usize,
     file_char_counts: &HashMap<String, usize>,
+    dry_run: bool,
 ) {
-    println!("Slop score report");
+    let header = if dry_run { "Slop score report (dry run)" } else { "Slop score report" };
+    println!("{}", header);
     println!("─────────────────────────────────────────────────────");
 
     let mut total_matches = 0;

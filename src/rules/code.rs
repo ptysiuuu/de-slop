@@ -24,11 +24,9 @@ fn split_camel_case(s: &str) -> Vec<String> {
     let mut current = String::new();
     let chars: Vec<char> = s.chars().collect();
     for i in 0..chars.len() {
-        if i > 0 && chars[i].is_uppercase() && chars[i - 1].is_lowercase() {
-            if !current.is_empty() {
-                parts.push(current.to_lowercase());
-                current.clear();
-            }
+        if i > 0 && chars[i].is_uppercase() && chars[i - 1].is_lowercase() && !current.is_empty() {
+            parts.push(current.to_lowercase());
+            current.clear();
         }
         current.push(chars[i]);
     }
@@ -72,6 +70,11 @@ fn is_comment_line(line: &str) -> bool {
     trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("--") || trimmed.starts_with('%')
 }
 
+fn is_doc_comment_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("///") || trimmed.starts_with("//!")
+}
+
 fn strip_comment_prefix(line: &str) -> &str {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix("//") {
@@ -113,18 +116,24 @@ impl Rule for TrivialCommentRule {
             let next_offset = byte_offset + line_len + 1; // +1 for \n
 
             if is_comment_line(line) {
+                // Doc comments (/// or //!) describe the item below, not a restatement
+                // of a code line. Skip the trivial check for them entirely.
+                if is_doc_comment_line(line) {
+                    byte_offset = next_offset;
+                    continue;
+                }
+
                 // Find adjacent code line
                 let mut adj_code = None;
-                
+
                 // Look ahead
-                for j in (i + 1)..lines.len() {
-                    let look_line = lines[j];
+                for look_line in lines.iter().skip(i + 1) {
                     let trimmed = look_line.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
                     if !is_comment_line(look_line) {
-                        adj_code = Some(look_line);
+                        adj_code = Some(*look_line);
                         break;
                     }
                 }
@@ -210,6 +219,12 @@ static RS_DOCSTRING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?sm)^(?:[ \t]*///.
 static JS_DOCSTRING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?sm)^[ \t]*/\*\*.*?\*/").unwrap());
 
 pub struct DocstringFillerRule;
+
+impl Default for DocstringFillerRule {
+    fn default() -> Self {
+        Self
+    }
+}
 
 impl DocstringFillerRule {
     pub fn new() -> Self {

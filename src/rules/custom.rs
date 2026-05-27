@@ -76,7 +76,7 @@ pub enum FixAction {
 
 /// A single parsed rule from a .deslop-rules file.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub struct ParsedRule {
     pub name: String,
     pub pattern: String,
@@ -97,7 +97,7 @@ pub struct DisableDirective {
 
 /// A fully parsed .deslop-rules file.
 #[derive(Debug)]
-#[allow(dead_code)]
+
 pub struct DeslopRulesFile {
     pub path: PathBuf,
     pub rules: Vec<ParsedRule>,
@@ -106,11 +106,10 @@ pub struct DeslopRulesFile {
 
 /// A validation error found during check-rules.
 #[derive(Debug)]
-#[allow(dead_code)]
+
 pub struct ValidationError {
     pub line: usize,
     pub message: String,
-    pub suggestion: Option<String>,
 }
 
 // Known field names for validation / typo detection.
@@ -151,10 +150,8 @@ fn suggest_field(unknown: &str) -> Option<String> {
     let mut best: Option<(&str, usize)> = None;
     for &field in KNOWN_FIELDS {
         let dist = levenshtein(unknown, field);
-        if dist <= 2 {
-            if best.is_none() || dist < best.unwrap().1 {
-                best = Some((field, dist));
-            }
+        if dist <= 2 && (best.is_none() || dist < best.unwrap().1) {
+            best = Some((field, dist));
         }
     }
     best.map(|(f, _)| f.to_string())
@@ -175,13 +172,14 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
-/// Parse a .deslop-rules file.
+/// Parse a .deslop-rules file, collecting all errors instead of bailing on the first.
 pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
     let mut rules = Vec::new();
     let mut disables = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
@@ -190,43 +188,38 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
         let line = lines[i];
         let trimmed = line.trim();
 
-        // Skip blank lines and comments
         if trimmed.is_empty() || trimmed.starts_with('#') {
             i += 1;
             continue;
         }
 
-        // Handle disable directives
         if trimmed.starts_with("disable ") {
             let rule_id = trimmed.strip_prefix("disable ").unwrap().trim().to_string();
             if rule_id.is_empty() {
-                bail!(
-                    "{}:{}: empty disable directive",
-                    path.display(),
-                    i + 1
-                );
+                errors.push(format!("line {}: empty disable directive", i + 1));
+            } else {
+                disables.push(DisableDirective { rule_id });
             }
-            disables.push(DisableDirective { rule_id });
             i += 1;
             continue;
         }
 
-        // Handle rule blocks
         if trimmed.starts_with("rule ") {
             let name = trimmed.strip_prefix("rule ").unwrap().trim().to_string();
+            let rule_start_line = i + 1;
             if name.is_empty() {
-                bail!("{}:{}: rule has no name", path.display(), i + 1);
+                errors.push(format!("line {}: rule has no name", i + 1));
+                i += 1;
+                continue;
             }
-            let rule_start_line = i + 1; // 1-indexed
             i += 1;
 
-            // Collect fields
+            // Collect fields for this rule block
             let mut fields: Vec<(String, String, usize)> = Vec::new();
             while i < lines.len() {
                 let field_line = lines[i];
                 let field_trimmed = field_line.trim();
 
-                // End of rule block: blank line, comment, or non-indented line
                 if field_trimmed.is_empty() {
                     i += 1;
                     continue;
@@ -235,19 +228,16 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
                     i += 1;
                     continue;
                 }
-                // Check if indented (part of this rule) or a new rule/disable
                 if !field_line.starts_with(' ') && !field_line.starts_with('\t') {
                     break;
                 }
 
-                // Parse field: name: value
                 if let Some(colon_pos) = field_trimmed.find(':') {
                     let field_name = field_trimmed[..colon_pos].trim().to_string();
                     let mut field_value = field_trimmed[colon_pos + 1..].trim().to_string();
                     let line_num = i + 1;
                     i += 1;
 
-                    // If value starts with """, it's a multiline string. Consume lines until closing """.
                     if field_value.starts_with("\"\"\"") && !field_value[3..].contains("\"\"\"") {
                         let mut parts = vec![field_value];
                         while i < lines.len() {
@@ -263,39 +253,33 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
 
                     fields.push((field_name, field_value, line_num));
                 } else {
-                    bail!(
-                        "{}:{}: expected 'field: value', got: {}",
-                        path.display(),
+                    errors.push(format!(
+                        "line {}: expected 'field: value', got: {}",
                         i + 1,
                         field_trimmed
-                    );
+                    ));
+                    i += 1;
                 }
             }
 
-            // Extract required fields
+            // Extract fields, accumulating errors for this rule
             let mut match_pattern: Option<String> = None;
             let mut fix_action: Option<FixAction> = None;
             let mut message: Option<String> = None;
             let mut confidence: f32 = 0.75;
             let mut file_globs: Vec<GlobMatcher> = Vec::new();
             let mut severity = Severity::Warn;
+            let mut rule_ok = true;
 
             for (field_name, field_value, line_num) in &fields {
                 match field_name.as_str() {
                     "match" => {
                         let val = field_value.as_str();
-                        // Handle multiline pattern
                         if val.starts_with("\"\"\"") {
-                            // Extract content between the first """ and the last """
                             let start_idx = 3;
                             let end_idx = val.rfind("\"\"\"").unwrap_or(val.len());
-                            let content = if end_idx > start_idx {
-                                &val[start_idx..end_idx]
-                            } else {
-                                &val[start_idx..]
-                            };
-                            // We need to strip spaces but joining lines without spaces is better for regex
-                            let joined = content.lines().map(|l| l.trim()).collect::<Vec<_>>().join("");
+                            let inner = if end_idx > start_idx { &val[start_idx..end_idx] } else { &val[start_idx..] };
+                            let joined = inner.lines().map(|l| l.trim()).collect::<Vec<_>>().join("");
                             match_pattern = Some(joined);
                         } else {
                             match_pattern = Some(strip_quotes(val).to_string());
@@ -307,33 +291,27 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
                             "delete" => FixAction::Delete,
                             "delete-line" => FixAction::DeleteLine,
                             "flag" => FixAction::Flag,
-                            _ => {
-                                // Quoted replacement string
-                                FixAction::Replace(strip_quotes(val).to_string())
-                            }
+                            _ => FixAction::Replace(strip_quotes(val).to_string()),
                         });
                     }
                     "message" => {
                         message = Some(strip_quotes(field_value).to_string());
                     }
                     "confidence" => {
-                        confidence = field_value
-                            .parse::<f32>()
-                            .with_context(|| {
-                                format!(
-                                    "{}:{}: invalid confidence value: {}",
-                                    path.display(),
-                                    line_num,
-                                    field_value
-                                )
-                            })?;
-                        if !(0.0..=1.0).contains(&confidence) {
-                            bail!(
-                                "{}:{}: confidence must be between 0.0 and 1.0, got {}",
-                                path.display(),
-                                line_num,
-                                confidence
-                            );
+                        match field_value.parse::<f32>() {
+                            Ok(v) if (0.0..=1.0).contains(&v) => confidence = v,
+                            Ok(v) => {
+                                errors.push(format!(
+                                    "line {}: confidence must be between 0.0 and 1.0, got {}",
+                                    line_num, v
+                                ));
+                            }
+                            Err(_) => {
+                                errors.push(format!(
+                                    "line {}: invalid confidence value: {}",
+                                    line_num, field_value
+                                ));
+                            }
                         }
                     }
                     "files" => {
@@ -341,86 +319,78 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
                         for glob_str in globs_str.split(',') {
                             let glob_str = glob_str.trim();
                             if !glob_str.is_empty() {
-                                let glob = Glob::new(glob_str).with_context(|| {
-                                    format!(
-                                        "{}:{}: invalid glob pattern: {}",
-                                        path.display(),
-                                        line_num,
-                                        glob_str
-                                    )
-                                })?;
-                                file_globs.push(glob.compile_matcher());
+                                match Glob::new(glob_str) {
+                                    Ok(g) => file_globs.push(g.compile_matcher()),
+                                    Err(e) => errors.push(format!(
+                                        "line {}: invalid glob pattern '{}': {}",
+                                        line_num, glob_str, e
+                                    )),
+                                }
                             }
                         }
                     }
                     "severity" => {
-                        severity = match field_value.trim() {
-                            "warn" => Severity::Warn,
-                            "error" => Severity::Error,
-                            _ => bail!(
-                                "{}:{}: invalid severity: {} (expected 'warn' or 'error')",
-                                path.display(),
-                                line_num,
-                                field_value
-                            ),
-                        };
+                        match field_value.trim() {
+                            "warn" => severity = Severity::Warn,
+                            "error" => severity = Severity::Error,
+                            v => errors.push(format!(
+                                "line {}: invalid severity: {} (expected 'warn' or 'error')",
+                                line_num, v
+                            )),
+                        }
                     }
                     unknown => {
                         let suggestion = suggest_field(unknown);
                         let msg = if let Some(ref s) = suggestion {
                             format!(
-                                "{}:{}: unknown field \"{}\" (did you mean \"{}\"?)",
-                                path.display(),
-                                line_num,
-                                unknown,
-                                s
+                                "line {}: unknown field \"{}\" (did you mean \"{}\"?)",
+                                line_num, unknown, s
                             )
                         } else {
-                            format!(
-                                "{}:{}: unknown field \"{}\"",
-                                path.display(),
-                                line_num,
-                                unknown
-                            )
+                            format!("line {}: unknown field \"{}\"", line_num, unknown)
                         };
-                        bail!("{}", msg);
+                        errors.push(msg);
                     }
                 }
             }
 
             let pattern = match match_pattern {
                 Some(p) => p,
-                None => bail!(
-                    "{}:{}: rule '{}' is missing required 'match' field",
-                    path.display(),
-                    rule_start_line,
-                    name
-                ),
+                None => {
+                    errors.push(format!(
+                        "line {}: rule '{}' missing required 'match' field",
+                        rule_start_line, name
+                    ));
+                    rule_ok = false;
+                    String::new()
+                }
             };
 
             let fix = match fix_action {
                 Some(f) => f,
-                None => bail!(
-                    "{}:{}: rule '{}' is missing required 'fix' field",
-                    path.display(),
-                    rule_start_line,
-                    name
-                ),
+                None => {
+                    errors.push(format!(
+                        "line {}: rule '{}' missing required 'fix' field",
+                        rule_start_line, name
+                    ));
+                    rule_ok = false;
+                    FixAction::Flag
+                }
             };
 
-            let is_regex = is_regex_pattern(&pattern);
+            if !rule_ok {
+                continue;
+            }
 
-            // Validate regex compiles
+            let is_regex = is_regex_pattern(&pattern);
             if is_regex {
-                Regex::new(&pattern).with_context(|| {
-                    format!(
-                        "{}:{}: rule '{}' has invalid regex: {}",
-                        path.display(),
-                        rule_start_line,
-                        name,
-                        pattern
-                    )
-                })?;
+                if let Err(e) = Regex::new(&pattern) {
+                    errors.push(format!(
+                        "line {}: rule '{}' has invalid regex: {}",
+                        rule_start_line, name, e
+                    ));
+                    continue;
+                }
             }
 
             rules.push(ParsedRule {
@@ -438,13 +408,19 @@ pub fn parse_deslop_rules(path: &Path) -> Result<DeslopRulesFile> {
             continue;
         }
 
-        // Unrecognized top-level line
-        bail!(
-            "{}:{}: unexpected line: {}",
+        errors.push(format!("line {}: unexpected line: {}", i + 1, trimmed));
+        i += 1;
+    }
+
+    if !errors.is_empty() {
+        let header = format!(
+            "{}: {} error{} found",
             path.display(),
-            i + 1,
-            trimmed
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" }
         );
+        let detail = errors.iter().map(|e| format!("  {}", e)).collect::<Vec<_>>().join("\n");
+        anyhow::bail!("{}\n{}", header, detail);
     }
 
     Ok(DeslopRulesFile {
@@ -502,7 +478,7 @@ pub struct CustomFileRule {
     compiled_pattern: Regex,
 }
 
-#[allow(dead_code)]
+
 impl CustomFileRule {
     pub fn from_parsed(parsed: ParsedRule) -> Result<Self> {
         let compiled_pattern = if parsed.is_regex {
@@ -611,7 +587,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
             errors.push(ValidationError {
                 line: 0,
                 message: format!("failed to read file: {}", e),
-                suggestion: None,
             });
             return errors;
         }
@@ -638,7 +613,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                 errors.push(ValidationError {
                     line: i + 1,
                     message: "empty disable directive".to_string(),
-                    suggestion: None,
                 });
             }
             i += 1;
@@ -652,14 +626,12 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                     errors.push(ValidationError {
                         line: start_line,
                         message: format!("rule '{}' missing required 'match' field", name),
-                        suggestion: None,
                     });
                 }
                 if !has_fix {
                     errors.push(ValidationError {
                         line: start_line,
                         message: format!("rule '{}' missing required 'fix' field", name),
-                        suggestion: None,
                     });
                 }
             }
@@ -669,7 +641,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                 errors.push(ValidationError {
                     line: i + 1,
                     message: "rule has no name".to_string(),
-                    suggestion: None,
                 });
             }
             current_rule = Some((name, i + 1));
@@ -705,7 +676,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                                 errors.push(ValidationError {
                                     line: i + 1,
                                     message: "unclosed multiline pattern (missing closing \"\"\")".to_string(),
-                                    suggestion: None,
                                 });
                             }
                         } else {
@@ -715,7 +685,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                                     errors.push(ValidationError {
                                         line: i + 1,
                                         message: format!("invalid regex: {}", e),
-                                        suggestion: None,
                                     });
                                 }
                             }
@@ -736,17 +705,15 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                                     "invalid fix value: {} (expected delete, delete-line, flag, or a quoted string)",
                                     val
                                 ),
-                                suggestion: None,
                             });
                         }
                     }
                     "message" => {}
                     "confidence" => {
-                        if let Err(_) = field_value.parse::<f32>() {
+                        if field_value.parse::<f32>().is_err() {
                             errors.push(ValidationError {
                                 line: i + 1,
                                 message: format!("invalid confidence value: {}", field_value),
-                                suggestion: None,
                             });
                         } else {
                             let val: f32 = field_value.parse().unwrap_or(0.0);
@@ -757,7 +724,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                                         "confidence must be between 0.0 and 1.0, got {}",
                                         val
                                     ),
-                                    suggestion: None,
                                 });
                             }
                         }
@@ -771,7 +737,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                                     errors.push(ValidationError {
                                         line: i + 1,
                                         message: format!("invalid glob pattern '{}': {}", glob_str, e),
-                                        suggestion: None,
                                     });
                                 }
                             }
@@ -786,7 +751,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                                     "invalid severity: {} (expected 'warn' or 'error')",
                                     val
                                 ),
-                                suggestion: None,
                             });
                         }
                     }
@@ -803,7 +767,6 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                         errors.push(ValidationError {
                             line: i + 1,
                             message: msg,
-                            suggestion,
                         });
                     }
                 }
@@ -811,7 +774,7 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
                 errors.push(ValidationError {
                     line: i + 1,
                     message: format!("expected 'field: value', got: {}", trimmed),
-                    suggestion: None,
+
                 });
             }
             i += 1;
@@ -822,7 +785,7 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
         errors.push(ValidationError {
             line: i + 1,
             message: format!("unexpected line: {}", trimmed),
-            suggestion: None,
+
         });
         i += 1;
     }
@@ -833,14 +796,14 @@ pub fn validate_deslop_rules(path: &Path) -> Vec<ValidationError> {
             errors.push(ValidationError {
                 line: start_line,
                 message: format!("rule '{}' missing required 'match' field", name),
-                suggestion: None,
+
             });
         }
         if !has_fix {
             errors.push(ValidationError {
                 line: start_line,
                 message: format!("rule '{}' missing required 'fix' field", name),
-                suggestion: None,
+
             });
         }
     }

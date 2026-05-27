@@ -196,35 +196,31 @@ pub fn build_registry(
     custom_phrases: &[String],
     _extra_profiles: &[Profile],
 ) -> Vec<Box<dyn Rule>> {
-    let mut rules: Vec<Box<dyn Rule>> = Vec::new();
-
-    // Typographic rules (highest priority — lowest registry index)
-    rules.push(Box::new(typography::EmDashRule));
-    rules.push(Box::new(typography::EnDashRule));
-    rules.push(Box::new(typography::CurlyQuotesRule));
-    rules.push(Box::new(typography::EllipsisRule));
-    rules.push(Box::new(typography::NbspRule));
-    rules.push(Box::new(typography::ZeroWidthRule));
-    rules.push(Box::new(typography::SoftHyphenRule));
-
-    // Symbol rules
-    rules.push(Box::new(emoji::EmojiRule::new(allow_symbols)));
-    rules.push(Box::new(emoji::DecorativeUnicodeRule::new(allow_symbols)));
-
-    // Prose rules
-    rules.push(Box::new(prose::FillerOpenersRule::new()));
-    rules.push(Box::new(prose::SycophanticClosersRule::new()));
-    rules.push(Box::new(prose::HedgesRule::new()));
-    rules.push(Box::new(prose::TransitionPaddingRule::new()));
-    rules.push(Box::new(prose::HollowIntensifiersRule));
-
-    // Code rules
-    rules.push(Box::new(code::TrivialCommentRule));
-    rules.push(Box::new(code::DocstringFillerRule::new()));
+    let mut rules: Vec<Box<dyn Rule>> = vec![
+        Box::new(typography::EmDashRule),
+        Box::new(typography::EnDashRule),
+        Box::new(typography::CurlyQuotesRule),
+        Box::new(typography::EllipsisRule),
+        Box::new(typography::NbspRule),
+        Box::new(typography::ZeroWidthRule),
+        Box::new(typography::SoftHyphenRule),
+        Box::new(emoji::EmojiRule::new(allow_symbols)),
+        Box::new(emoji::DecorativeUnicodeRule::new(allow_symbols)),
+        Box::new(prose::FillerOpenersRule::new()),
+        Box::new(prose::SycophanticClosersRule::new()),
+        Box::new(prose::HedgesRule::new()),
+        Box::new(prose::TransitionPaddingRule::new()),
+        Box::new(prose::HollowIntensifiersRule),
+        Box::new(code::TrivialCommentRule),
+        Box::new(code::DocstringFillerRule::new()),
+    ];
 
     // Language pack rules — always registered, gated by Profile::allows()
     rules.extend(lang_packs::rust_pack_rules());
     rules.extend(lang_packs::python_pack_rules());
+    rules.extend(lang_packs::js_ts_pack_rules());
+    rules.extend(lang_packs::go_pack_rules());
+    rules.extend(lang_packs::sql_pack_rules());
 
     // Custom phrase rules from config
     if !custom_phrases.is_empty() {
@@ -250,6 +246,12 @@ pub enum Profile {
     /// Python language-specific rules (stacks on top of Code)
     #[serde(rename = "python-pack")]
     PythonPack,
+    #[serde(rename = "jsts-pack")]
+    JsTsPack,
+    #[serde(rename = "go-pack")]
+    GoPack,
+    #[serde(rename = "sql-pack")]
+    SqlPack,
 }
 
 impl Profile {
@@ -270,7 +272,7 @@ impl Profile {
                 | Category::Code | Category::Custom
             ),
             // Packs include Code + Typographic + Symbol + Custom + PackSpecific
-            Profile::RustPack | Profile::PythonPack => matches!(category,
+            Profile::RustPack | Profile::PythonPack | Profile::JsTsPack | Profile::GoPack | Profile::SqlPack => matches!(category,
                 Category::Typographic | Category::Symbol | Category::Code
                 | Category::Custom | Category::PackSpecific
             ),
@@ -279,7 +281,7 @@ impl Profile {
 
     /// True if this profile is a language pack (not a base profile).
     pub fn is_pack(&self) -> bool {
-        matches!(self, Profile::RustPack | Profile::PythonPack)
+        matches!(self, Profile::RustPack | Profile::PythonPack | Profile::JsTsPack | Profile::GoPack | Profile::SqlPack)
     }
 
     /// Returns an iterator over the language-specific pack categories this profile enables.
@@ -287,6 +289,9 @@ impl Profile {
         match self {
             Profile::RustPack => Some("rust"),
             Profile::PythonPack => Some("python"),
+            Profile::JsTsPack => Some("javascript"),
+            Profile::GoPack => Some("go"),
+            Profile::SqlPack => Some("sql"),
             _ => None,
         }
     }
@@ -301,6 +306,9 @@ impl fmt::Display for Profile {
             Profile::Aggressive => write!(f, "aggressive"),
             Profile::RustPack => write!(f, "rust-pack"),
             Profile::PythonPack => write!(f, "python-pack"),
+            Profile::JsTsPack => write!(f, "jsts-pack"),
+            Profile::GoPack => write!(f, "go-pack"),
+            Profile::SqlPack => write!(f, "sql-pack"),
         }
     }
 }
@@ -316,6 +324,9 @@ impl std::str::FromStr for Profile {
             "aggressive" => Ok(Profile::Aggressive),
             "rust-pack" => Ok(Profile::RustPack),
             "python-pack" => Ok(Profile::PythonPack),
+            "jsts-pack" => Ok(Profile::JsTsPack),
+            "go-pack" => Ok(Profile::GoPack),
+            "sql-pack" => Ok(Profile::SqlPack),
             _ => Err(anyhow::anyhow!("unknown profile: {}", s)),
         }
     }
