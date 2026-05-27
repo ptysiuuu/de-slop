@@ -7,7 +7,7 @@
 # --- IDEs and Text Editors ---
 # JetBrains (IntelliJ, RustRover, etc.)
 .idea/
-
+/editors
 # VS Code
 .vscode/
 *.code-workspace
